@@ -1,0 +1,15 @@
+# gmail-cleanup-cli dependencies
+# Install with: pip install -r requirements.txt
+
+# HTTP client — used to call the Anthropic REST API directly
+requests>=2.31.0,<3.0.0
+
+# Environment variable loading from .env
+python-dotenv>=1.0.0,<2.0.0
+
+# Terminal UI: colored output, progress bars, tables
+rich>=13.7.0,<14.0.0
+
+# Optional: official Anthropic SDK (not used by default, but available)
+# Uncomment if you prefer SDK-style calls over raw requests
+# anthropic>=0.30.0,<1.0.0
