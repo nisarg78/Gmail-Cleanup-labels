@@ -6,6 +6,8 @@
 [![Next.js](https://img.shields.io/badge/Next.js-16-black)](https://nextjs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue)](https://typescriptlang.org)
 
+![InboxPilot landing page](public/screenshots/landing.png)
+
 ## Features
 
 - **Full inbox scan** — paginate your entire Gmail inbox, grouped by sender
@@ -105,33 +107,96 @@ In Settings: select "OpenAI-compatible", provide base URL and API key.
 
 ## Architecture
 
+### Request flow
+
 ```
-User Browser
-    |
-    v
-NextAuth v5 (Google OAuth2)
-    |
-    +---> /api/gmail/scan (SSE Stream)
-    |         |
-    |         v
-    |     Gmail API
-    |     (messages.list, metadata)
-    |         |
-    |         v
-    |     SQLite Cache
-    |
-    +---> /api/classify (SSE Stream)
-    |         |
-    |         v
-    |     LLM Provider
-    |     (Anthropic, OpenAI, Ollama, etc.)
-    |
-    +---> /api/labels (SSE Stream)
-            |
-            v
-        Gmail API
-        (labels.create, batchModify)
+Browser                    Next.js Server              External
+───────                    ──────────────              ────────
+Landing (/)
+  └─ Connect Gmail ──────► NextAuth v5 ─────────────► Google OAuth2
+                            JWT cookie ◄────────────── access_token
+                                                        refresh_token
+Dashboard (/dashboard)
+  └─ Start Scan ──────────► /api/gmail/scan (SSE)
+                              ├─ messages.list ────────► Gmail API
+                              ├─ messages.get ×N ──────► Gmail API
+                              └─ cache results ────────► SQLite
+
+  └─ Classify with AI ────► /api/classify (SSE)
+                              ├─ batch 15 senders
+                              ├─ safety overrides (code-enforced)
+                              └─ classify ─────────────► Anthropic / OpenAI
+                                                          Ollama / compatible
+
+  └─ Execute in Gmail ────► /api/labels (SSE)
+                              └─ labels.create ─────────► Gmail API
+                            /api/labels/apply (SSE)
+                              └─ batchModify ×1000 ─────► Gmail API
 ```
+
+### Codebase structure
+
+```
+src/
+├── app/
+│   ├── page.tsx                    Landing page (public)
+│   ├── dashboard/
+│   │   ├── page.tsx                Protected server component
+│   │   └── DashboardClient.tsx     Full scan→classify→approve→execute flow
+│   ├── settings/
+│   │   └── page.tsx                LLM provider config
+│   └── api/
+│       ├── auth/[...nextauth]/     NextAuth handlers
+│       ├── gmail/scan/             Inbox scan SSE stream
+│       ├── classify/               LLM classification SSE stream
+│       ├── classify/test/          Provider connection test
+│       ├── labels/                 Label creation SSE stream
+│       └── labels/apply/           Label application SSE stream
+│
+├── lib/
+│   ├── gmail/
+│   │   ├── types.ts                MessageMetadata, SenderSummary, ScanResult
+│   │   ├── scanner.ts              Phase 1 (list IDs) + Phase 2 (metadata fetch)
+│   │   ├── aggregator.ts           Group messages by sender
+│   │   ├── heuristics.ts           Rule-based pre-classification
+│   │   └── labeler.ts              labels.create + batchModify (1000/call)
+│   ├── llm/
+│   │   ├── provider.ts             LLMProvider interface + safety overrides
+│   │   ├── anthropic.ts            @anthropic-ai/sdk
+│   │   ├── openai.ts               openai sdk
+│   │   ├── ollama.ts               fetch → localhost:11434
+│   │   ├── compatible.ts           OpenAI SDK with custom baseURL
+│   │   └── classifier.ts           Batch orchestrator + AsyncGenerator stream
+│   ├── batching/
+│   │   ├── token-counter.ts        Batch size by model context window
+│   │   └── retry.ts                Exponential backoff, 429 detection
+│   ├── db.ts                       sql.js SQLite cache (scan results)
+│   └── labels.ts                   26 label definitions with Gmail hex colors
+│
+└── components/
+    ├── ScanProgress.tsx            Real-time scan progress (EventSource)
+    ├── StatsCards.tsx              5 derived metric cards
+    ├── SenderTable.tsx             Sort/filter/search/paginate table
+    ├── LabelPreview.tsx            Gmail sidebar preview
+    ├── ApprovalPanel.tsx           List + one-by-one review, safety locks
+    ├── ExecutionLog.tsx            Terminal-style real-time log
+    ├── ExecutionResults.tsx        Post-execution summary + CSV export
+    ├── LLMConfig.tsx               Provider settings form
+    └── useToast.tsx                Stacking toast notifications
+```
+
+### Key design decisions
+
+| Decision | Choice | Reason |
+|----------|--------|--------|
+| Auth | NextAuth v5 JWT (stateless) | No DB needed for auth; tokens in encrypted cookies |
+| Gmail metadata only | `format: "metadata"` + headers | Privacy — never reads email body |
+| Batch strategy | Promise.all chunks of 50, 1s sleep | 250 quota units/sec limit (50 × 5 units) |
+| Label application | `batchModify` up to 1000 IDs | Single API call vs. one-by-one would be 1000× slower |
+| Safety overrides | Post-LLM code enforcement | LLM cannot override financial/government/security rules |
+| API keys | localStorage only | Never logged or stored server-side |
+| SQLite | sql.js (pure WASM) | Works on Windows without native compilation |
+| Streaming | ReadableStream + SSE | Real-time progress for multi-minute operations |
 
 ## Privacy & Security
 
@@ -144,6 +209,47 @@ NextAuth v5 (Google OAuth2)
 ## Google Cloud Setup
 
 See [docs/SETUP.md](docs/SETUP.md) for detailed instructions.
+
+## How it was built
+
+InboxPilot was built entirely with [Claude Code](https://claude.ai/claude-code) using a **dispatching-parallel-agents** pattern — the same pattern documented in this repo.
+
+### The approach
+
+Instead of building features sequentially, the implementation used parallel agent dispatch: independent modules were identified, briefed as isolated agents, and executed concurrently. Each agent received only the context it needed and produced a single focused output.
+
+**Example: building the LLM provider system (Prompt 4)**
+
+```
+Wave 1 — parallel (no file overlap):
+  Agent A → provider.ts + token-counter.ts + retry.ts  (pure types + utilities)
+  Agent B → LLMConfig.tsx + settings/page.tsx           (settings UI)
+
+Wave 2 — parallel (all depend on provider.ts):
+  Agent C → anthropic.ts + openai.ts    (SDK-backed providers)
+  Agent D → ollama.ts + compatible.ts   (fetch-based providers)
+
+Wave 3 — sequential (depends on all providers):
+  → classifier.ts  (batch orchestrator + async generator)
+
+Wave 4 — parallel:
+  Agent E → /api/classify route         (SSE endpoint)
+  Agent F → ApprovalPanel.tsx           (review UI)
+
+Wave 5 — sequential:
+  → wire DashboardClient + build check
+```
+
+This pattern was repeated across all 6 prompts. The full project — scanner, classification pipeline, label execution engine, settings, UI, Docker, and docs — was built across **~25 parallel agent dispatches** with zero file conflicts.
+
+### Why it works
+
+- **Isolation** — agents don't share context or history, so they stay focused
+- **Parallelism** — independent modules build concurrently (4 providers in the time of 1)
+- **Correctness** — each agent gets the exact types and interfaces it needs; TypeScript validates integration
+- **Speed** — the entire application was built in a single session
+
+The session transcript and all design specs are preserved in `docs/superpowers/`.
 
 ## Contributing
 
