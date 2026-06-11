@@ -12,6 +12,7 @@ import { LabelPreview } from "@/app/components/LabelPreview"
 import ApprovalPanel from "@/app/components/ApprovalPanel"
 import ExecutionLog, { type LogEntry, type LogLevel } from "@/app/components/ExecutionLog"
 import { ExecutionResults } from "@/app/components/ExecutionResults"
+import { useToast } from "@/app/components/useToast"
 import Link from "next/link"
 
 interface DashboardClientProps {
@@ -28,6 +29,8 @@ type ExecuteState = "idle" | "creating" | "applying" | "done"
 let logIdCounter = 0
 
 export default function DashboardClient({ user }: DashboardClientProps) {
+  const { showToast, ToastContainer } = useToast()
+
   const [senders, setSenders] = useState<SenderSummary[] | null>(null)
   const [scanError, setScanError] = useState<string | null>(null)
 
@@ -78,13 +81,18 @@ export default function DashboardClient({ user }: DashboardClientProps) {
   const handleClassify = useCallback(async () => {
     if (!senders) return
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) { setClassifyError("Configure your LLM provider in Settings first."); return }
+    if (!raw) {
+      const msg = "Configure your LLM provider in Settings first."
+      setClassifyError(msg); showToast(msg, "info"); return
+    }
     let config: LLMConfig
     try { config = JSON.parse(raw) as LLMConfig } catch {
-      setClassifyError("Invalid LLM config. Reconfigure in Settings."); return
+      const msg = "Invalid LLM config. Reconfigure in Settings."
+      setClassifyError(msg); showToast(msg, "error"); return
     }
     if (config.provider === "none") {
-      setClassifyError("LLM set to 'No LLM'. Configure a provider in Settings."); return
+      const msg = "LLM set to 'No LLM'. Configure a provider in Settings."
+      setClassifyError(msg); showToast(msg, "info"); return
     }
     setClassifyState("classifying"); setClassifyError(null); setClassifyResults([])
     try {
@@ -97,7 +105,10 @@ export default function DashboardClient({ user }: DashboardClientProps) {
       const allResults: ClassificationResult[] = []
       await readSSEStream(res, (event) => {
         if (event.error) throw new Error(event.error as string)
-        if (event.done) { setClassifyState("reviewing"); setClassifyResults([...allResults]) }
+        if (event.done) {
+          setClassifyState("reviewing"); setClassifyResults([...allResults])
+          showToast(`Classified ${allResults.length} senders`, "success")
+        }
         if (event.results) {
           allResults.push(...(event.results as ClassificationResult[]))
           setClassifyProgress({ batch: event.batch as number, total: event.totalBatches as number })
@@ -105,9 +116,10 @@ export default function DashboardClient({ user }: DashboardClientProps) {
       })
     } catch (err) {
       setClassifyState("idle")
-      setClassifyError(err instanceof Error ? err.message : "Classification failed")
+      const msg = err instanceof Error ? err.message : "Classification failed"
+      setClassifyError(msg); showToast(`Classification failed: ${msg}`, "error")
     }
-  }, [senders, readSSEStream])
+  }, [senders, readSSEStream, showToast])
 
   const handleApprove = useCallback((approved: ClassificationResult[]) => {
     setApprovedResults(approved); setClassifyState("approved")
@@ -174,20 +186,23 @@ export default function DashboardClient({ user }: DashboardClientProps) {
           addLog("success", `Done! ${event.done} senders labeled, ${event.emailsLabeled} emails total.`)
           setApplyResults([...appliedResults])
           setExecuteState("done")
+          showToast(`Labeled ${event.emailsLabeled} emails across ${event.done} senders`, "success")
         }
       })
     } catch (err) {
       setExecuteState("idle")
-      setExecuteError(err instanceof Error ? err.message : "Execution failed")
-      addLog("error", err instanceof Error ? err.message : "Execution failed")
+      const msg = err instanceof Error ? err.message : "Execution failed"
+      setExecuteError(msg)
+      addLog("error", msg)
+      showToast(`Execution failed: ${msg}`, "error")
     }
-  }, [approvedResults, addLog, readSSEStream])
+  }, [approvedResults, addLog, readSSEStream, showToast])
 
   return (
     <div className="space-y-8">
       <ScanProgress
-        onComplete={(s) => { setSenders(s); setScanError(null) }}
-        onError={(msg) => setScanError(msg)}
+        onComplete={(s) => { setSenders(s); setScanError(null); showToast(`Scanned ${s.length} senders`, "success") }}
+        onError={(msg) => { setScanError(msg); showToast(`Scan failed: ${msg}`, "error") }}
       />
 
       {scanError && <p className="text-red-400 text-sm">{scanError}</p>}
@@ -264,6 +279,8 @@ export default function DashboardClient({ user }: DashboardClientProps) {
           <LabelPreview />
         </>
       )}
+
+      {ToastContainer}
     </div>
   )
 }

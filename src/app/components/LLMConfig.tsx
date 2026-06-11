@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useToast } from "./useToast"
 
 const STORAGE_KEY = "inboxpilot_llm_config"
 
@@ -28,6 +29,8 @@ const PROVIDER_LABELS: Record<string, string> = {
 }
 
 export function LLMConfig() {
+  const { showToast, ToastContainer } = useToast()
+
   const [config, setConfig] = useState<LLMConfig>({
     provider: "none",
     apiKey: "",
@@ -54,6 +57,7 @@ export function LLMConfig() {
   const handleSave = () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
     setSaved(true)
+    showToast("Settings saved", "success")
     setTimeout(() => setSaved(false), 2000)
   }
 
@@ -67,9 +71,16 @@ export function LLMConfig() {
         body: JSON.stringify(config),
       })
       const data = await res.json()
-      setTestResult(data.ok ? "ok" : "fail")
-    } catch {
+      if (data.ok) {
+        setTestResult("ok")
+        showToast("Connection successful", "success")
+      } else {
+        setTestResult("fail")
+        showToast(`Connection failed${data.error ? `: ${data.error}` : ""}`, "error")
+      }
+    } catch (err) {
       setTestResult("fail")
+      showToast(`Connection failed: ${err instanceof Error ? err.message : "network error"}`, "error")
     } finally {
       setTesting(false)
     }
@@ -179,6 +190,8 @@ export function LLMConfig() {
         {testResult === "ok" && <span className="text-green-400 text-sm">✓ Connection successful</span>}
         {testResult === "fail" && <span className="text-red-400 text-sm">✗ Connection failed</span>}
       </div>
+
+      {ToastContainer}
     </div>
   )
 }

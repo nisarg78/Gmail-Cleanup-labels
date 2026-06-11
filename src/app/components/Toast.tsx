@@ -25,7 +25,7 @@ export function Toast({ message, type = "info", onDismiss, duration = 3000 }: To
 
   return (
     <div
-      className={`fixed bottom-4 right-4 z-50 px-4 py-3 rounded-lg border text-sm font-medium shadow-lg max-w-sm ${TYPE_STYLE[type]}`}
+      className={`px-4 py-3 rounded-lg border text-sm font-medium shadow-lg max-w-sm ${TYPE_STYLE[type]}`}
       role="alert"
     >
       <div className="flex items-center justify-between gap-3">
